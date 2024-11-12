@@ -1,0 +1,12 @@
+[Unit]
+Description=Mail Monitor Notifier Script Instance %i
+After=network.target
+
+[Service]
+EnvironmentFile=/opt/mail-monitor/%i.env
+ExecStart=/usr/bin/python3 /opt/mail-monitor/mail-monitor.py
+Restart=always
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target
