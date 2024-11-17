@@ -1,63 +1,139 @@
-import imaplib
 import email
 import requests
 import os
-import time
-import socket
+import datetime
+from imapclient import IMAPClient
+from bs4 import BeautifulSoup
 
 # Get configuration from environment variables
 IMAP_SERVER = os.getenv('IMAP_SERVER')
 EMAIL_ACCOUNT = os.getenv('EMAIL_ACCOUNT')
 EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD')
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-CHAT_ID = os.getenv('CHAT_ID')
+TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
-# Set up IMAP connection
-mail = imaplib.IMAP4_SSL(IMAP_SERVER)
-mail.login(EMAIL_ACCOUNT, EMAIL_PASSWORD)
-mail.select('inbox')
+highest_uid = 0
 
 def send_telegram_message(message):
     url = f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage'
-    data = {'chat_id': CHAT_ID, 'text': message}
+    data = {
+        'chat_id': TELEGRAM_CHAT_ID,
+        'text': message,
+        'parse_mode': 'Markdown',
+        'disable_web_page_preview': True
+    }
     requests.post(url, data=data)
 
-def check_email():
-    result, data = mail.search(None, 'UNSEEN')
-    email_ids = data[0].split()
-    for email_id in email_ids:
-        result, msg_data = mail.fetch(email_id, '(RFC822)')
-        msg = email.message_from_bytes(msg_data[0][1])
-        subject = msg['subject']
-        send_telegram_message(f'New email: {subject}')
+def get_email_body(msg):
+    if msg.is_multipart():
+        for part in msg.walk():
+            content_type = part.get_content_type()
+            content_disposition = str(part.get("Content-Disposition"))
+            # Skip attachments
+            if "attachment" in content_disposition:
+                continue
+            # Get the email body
+            if content_type == "text/plain":
+                body = part.get_payload(decode=True).decode('utf-8', errors='ignore')
+                return body
+            elif content_type == "text/html":
+                html_body = part.get_payload(decode=True).decode('utf-8', errors='ignore')
+                # Optionally, convert HTML to plain text
+                body = html_to_text(html_body)
+                return body
+    else:
+        content_type = msg.get_content_type()
+        if content_type == "text/plain":
+            body = msg.get_payload(decode=True).decode('utf-8', errors='ignore')
+            return body
+        elif content_type == "text/html":
+            html_body = msg.get_payload(decode=True).decode('utf-8', errors='ignore')
+            body = html_to_text(html_body)
+            return body
+    return ""
 
-# Check if the server supports IDLE
-if 'IDLE' in mail.capabilities:
-    print("Server supports IDLE. Waiting for new messages...")
-    try:
+def html_to_text(html_content):
+    # Simple HTML to text conversion
+    soup = BeautifulSoup(html_content, 'html.parser')
+    text = soup.get_text()
+    return text
+
+def escape_markdown(text):
+    # Escape special characters for Markdown
+    escape_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    for char in escape_chars:
+        text = text.replace(char, f'\\{char}')
+    return text
+
+def check_email(server):
+    global highest_uid
+    messages = server.search(['UNSEEN', 'UID', f'{highest_uid + 1}:*'])
+    for uid, message_data in sorted(server.fetch(messages, ['BODY.PEEK[]', 'INTERNALDATE']).items()):
+        try:
+            # If the uid is still the highest, skip it
+            if uid == highest_uid:
+                continue
+            
+            # Get the INTERNALDATE
+            internal_date = message_data[b'INTERNALDATE']
+
+            # Ensure internal_date is timezone-aware
+            if internal_date.tzinfo is None:
+                # Assign UTC timezone to internal_date
+                internal_date = internal_date.replace(tzinfo=datetime.timezone.utc)
+
+            # Time window check
+            time_difference = datetime.datetime.now(datetime.timezone.utc) - internal_date
+            if time_difference > datetime.timedelta(hours=2):
+                continue  # Skip messages older than 2 hours
+
+            highest_uid = int(uid)
+
+            print(f"You have new mail! With UID {uid}")
+
+            msg = email.message_from_bytes(message_data[b'BODY[]'])
+            subject = msg['subject']
+            sender = msg['from']
+            body = get_email_body(msg)
+            body_preview = body[:200]  # Adjust the number of characters as needed
+            # Escape Markdown special characters
+            subject = escape_markdown(subject)
+            body_preview = escape_markdown(body_preview)
+            message = f'*New email received for {EMAIL_ACCOUNT}*\n*From*: {sender}\n*Subject*: {subject}\n*Body Preview*: {body_preview}'
+            send_telegram_message(message)
+        except Exception as e:
+            print(f"Error processing email: {e}")
+
+with IMAPClient(IMAP_SERVER) as server:
+    server.login(EMAIL_ACCOUNT, EMAIL_PASSWORD)
+    server.select_folder('INBOX')
+
+    if highest_uid == 0:
+        # Get the maximum UID in the mailbox
+        max_uid = max(server.search(['ALL']) or [0])
+        highest_uid = max_uid
+
+    print(f"Highest UID: {highest_uid}")
+        
+    check_email(server)
+    if server.has_capability('IDLE'):
+        print("Server supports IDLE. Waiting for new messages...")
         while True:
-            tag = mail._new_tag()
-            mail.send(f"{tag} IDLE\r\n".encode())
-            response = mail.readline()
-
-            if response.strip().startswith(b'+ idling'):
-                mail.sock.settimeout(60)
-                try:
-                    response = mail.readline()
-                    if response and b'EXISTS' in response:
-                        check_email()
-                except (socket.timeout, imaplib.IMAP4.abort):
-                    pass
-            else:
+            is_idle = False
+            try:
+                server.idle()
+                is_idle = True
+                responses = server.idle_check(timeout=120)
+                server.idle_done()
+                is_idle = False
+                if responses:
+                    check_email(server)
+            except:
+                print("Exiting...")
                 break
-    except KeyboardInterrupt:
-        print("Exiting...")
-    finally:
-        mail.send(b'DONE\r\n')
-        mail.close()
-        mail.logout()
-else:
-    print("Server does not support IDLE. Exiting after initial check.")
-    check_email()
-    mail.close()
-    mail.logout()
+            finally:
+                if is_idle:
+                    server.idle_done()
+    else:
+        print("Server does not support IDLE. Exiting after initial check.")
+    server.logout()
