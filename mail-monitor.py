@@ -2,6 +2,7 @@ import email
 import requests
 import os
 import datetime
+import re
 from imapclient import IMAPClient
 from bs4 import BeautifulSoup
 
@@ -24,6 +25,11 @@ def send_telegram_message(message):
     }
     requests.post(url, data=data)
 
+def clean_all_whitespace(text):
+    """More aggressive cleaning - also handles spaces and tabs between newlines."""
+    # Replace sequences of whitespace containing 3+ newlines with exactly 2 newlines
+    return re.sub(r'[\t ]{2,}', ' ', re.sub(r'\n(?:\s*\n){2,}', '\n\n', text))
+
 def get_email_body(msg):
     if msg.is_multipart():
         for part in msg.walk():
@@ -35,21 +41,21 @@ def get_email_body(msg):
             # Get the email body
             if content_type == "text/plain":
                 body = part.get_payload(decode=True).decode('utf-8', errors='ignore')
-                return body
+                return clean_all_whitespace(body)
             elif content_type == "text/html":
                 html_body = part.get_payload(decode=True).decode('utf-8', errors='ignore')
                 # Optionally, convert HTML to plain text
                 body = html_to_text(html_body)
-                return body
+                return clean_all_whitespace(body)
     else:
         content_type = msg.get_content_type()
         if content_type == "text/plain":
             body = msg.get_payload(decode=True).decode('utf-8', errors='ignore')
-            return body
+            return clean_all_whitespace(body)
         elif content_type == "text/html":
             html_body = msg.get_payload(decode=True).decode('utf-8', errors='ignore')
             body = html_to_text(html_body)
-            return body
+            return clean_all_whitespace(body)
     return ""
 
 def html_to_text(html_content):
@@ -60,7 +66,7 @@ def html_to_text(html_content):
 
 def escape_markdown(text):
     # Escape special characters for Markdown
-    escape_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    escape_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '=', '|', '{', '}', '.']
     for char in escape_chars:
         text = text.replace(char, f'\\{char}')
     return text
@@ -95,10 +101,15 @@ def check_email(server):
             subject = msg['subject']
             sender = msg['from']
             body = get_email_body(msg)
-            body_preview = body[:200]  # Adjust the number of characters as needed
+            body_preview = body[:350]
             # Escape Markdown special characters
             subject = escape_markdown(subject)
             body_preview = escape_markdown(body_preview)
+
+            if len(body) > 350:
+                #Here to avoid escaping the ellipsis
+                body_preview += '...'
+
             message = f'*New email received for {EMAIL_ACCOUNT}*\n*From*: {sender}\n*Subject*: {subject}\n*Body Preview*: {body_preview}'
             send_telegram_message(message)
         except Exception as e:
