@@ -61,7 +61,7 @@ def get_email_body(msg):
 def html_to_text(html_content):
     # Simple HTML to text conversion
     soup = BeautifulSoup(html_content, 'html.parser')
-    text = soup.get_text()
+    text = soup.get_text(separator=' ')
     return text
 
 def escape_markdown(text):
