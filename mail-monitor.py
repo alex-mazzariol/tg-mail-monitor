@@ -5,6 +5,7 @@ import datetime
 import re
 from imapclient import IMAPClient
 from bs4 import BeautifulSoup
+from email.message import Message
 
 # Get configuration from environment variables
 IMAP_SERVER = os.getenv('IMAP_SERVER')
@@ -30,43 +31,82 @@ def clean_all_whitespace(text):
     # Replace sequences of whitespace containing 3+ newlines with exactly 2 newlines
     return re.sub(r'[\t ]{2,}', ' ', re.sub(r'\n(?:\s*\n){2,}', '\n\n', text))
 
-def get_email_body(msg):
+def _decode_part(part: Message) -> str:
+    """Decode a non-multipart part to unicode text, respecting charset."""
+    # Try to get raw bytes (handles base64/quoted-printable automatically)
+    payload = part.get_payload(decode=True)
+    if payload is None:
+        # Some libraries may give a str payload already
+        payload = part.get_payload()
+        return payload if isinstance(payload, str) else ""
+    # Use declared charset if present; otherwise fall back
+    charset = part.get_content_charset() or part.get_charset() or "utf-8"
+    try:
+        return payload.decode(charset, errors="replace")
+    except LookupError:
+        # Unknown codec — fall back to utf-8
+        return payload.decode("utf-8", errors="replace")
+
+def get_email_body(msg: Message) -> str:
+    html_candidates = []
+    text_candidates = []
+
     if msg.is_multipart():
         for part in msg.walk():
-            content_type = part.get_content_type()
-            content_disposition = str(part.get("Content-Disposition"))
-            # Skip attachments
-            if "attachment" in content_disposition:
+            # Skip container parts
+            if part.is_multipart():
                 continue
-            # Get the email body
-            if content_type == "text/plain":
-                body = part.get_payload(decode=True).decode('utf-8', errors='ignore')
-                return clean_all_whitespace(body)
-            elif content_type == "text/html":
-                html_body = part.get_payload(decode=True).decode('utf-8', errors='ignore')
-                # Optionally, convert HTML to plain text
-                body = html_to_text(html_body)
-                return clean_all_whitespace(body)
+
+            ctype = (part.get_content_type() or "").lower()
+            disp = (part.get("Content-Disposition") or "").lower()
+
+            # Skip attachments/inline binaries
+            if "attachment" in disp or part.get_filename() or ctype.startswith("image/"):
+                continue
+
+            if ctype == "text/html":
+                html_candidates.append(_decode_part(part))
+            elif ctype == "text/plain":
+                text_candidates.append(_decode_part(part))
     else:
-        content_type = msg.get_content_type()
-        if content_type == "text/plain":
-            body = msg.get_payload(decode=True).decode('utf-8', errors='ignore')
-            return clean_all_whitespace(body)
-        elif content_type == "text/html":
-            html_body = msg.get_payload(decode=True).decode('utf-8', errors='ignore')
-            body = html_to_text(html_body)
-            return clean_all_whitespace(body)
+        ctype = (msg.get_content_type() or "").lower()
+        if ctype == "text/html":
+            html_candidates.append(_decode_part(msg))
+        elif ctype == "text/plain":
+            text_candidates.append(_decode_part(msg))
+
+    # Prefer HTML → plain fallback. In multipart/alternative, the best version is usually last.
+    if html_candidates:
+        for html in reversed(html_candidates):
+            text = html_to_text(html)  # your function
+            cleaned = clean_all_whitespace(text)  # your function
+            if cleaned.strip():
+                return cleaned
+        # If everything was empty whitespace, still return the last processed
+        return clean_all_whitespace(html_to_text(html_candidates[-1]))
+
+    if text_candidates:
+        for plain in reversed(text_candidates):
+            cleaned = clean_all_whitespace(plain)
+            if cleaned.strip():
+                return cleaned
+        return clean_all_whitespace(text_candidates[-1])
+
     return ""
 
 def html_to_text(html_content):
     # Simple HTML to text conversion
     soup = BeautifulSoup(html_content, 'html.parser')
-    text = soup.get_text(separator=' ')
-    return text
+
+    # Remove all links
+    for a in soup.find_all("a"):
+        a.replace_with(a.get_text())
+
+    return soup.get_text(separator=' ')
 
 def escape_markdown(text):
     # Escape special characters for Markdown
-    escape_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '=', '|', '{', '}', '.']
+    escape_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '=', '|', '{', '}']
     for char in escape_chars:
         text = text.replace(char, f'\\{char}')
     return text
