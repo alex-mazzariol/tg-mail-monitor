@@ -141,6 +141,8 @@ def check_email(server):
             subject = msg['subject']
             sender = msg['from']
             body = get_email_body(msg)
+            # Cleanup spaces around newlines
+            body = '\n'.join(line.strip() for line in body.split('\n'))
             body_preview = body[:350]
             # Escape Markdown special characters
             subject = escape_markdown(subject)
